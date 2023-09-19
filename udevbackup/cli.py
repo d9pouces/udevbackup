@@ -1,7 +1,7 @@
 import argparse
 import glob
 import os
-import subprocess
+import subprocess  # nosec B404
 import sys
 from configparser import ConfigParser
 
@@ -19,6 +19,7 @@ logger = getLogger(name="udevbackup")
 
 
 def load_config(config_dir):
+    """Load the configuration."""
     config_filenames = glob.glob("%s/*.ini" % config_dir)
     parser = ConfigParser()
     parser.read(config_filenames, encoding="utf-8")
@@ -35,13 +36,10 @@ def load_config(config_dir):
 
 
 def main():
-    """
-
-    Returns:
-      * :class:`int`: 0 in case of success, != 0 if something went wrong
-
-    """
-    parser = argparse.ArgumentParser(description="Run script when targetted external devices are connected")
+    """Run the scripts, should be launched by a udev rule."""
+    parser = argparse.ArgumentParser(
+        description="Run script when targetted external devices are connected"
+    )
     parser.add_argument("command", choices=("show", "run", "help", "at"))
     parser.add_argument(
         "--config-dir",
@@ -73,7 +71,7 @@ def main():
         config.show()
     elif args.command == "at":
         fs_uuid = args.fs_uuid or os.environ.get("ID_FS_UUID", "")
-        p = subprocess.Popen(["at", "now"], stdin=subprocess.PIPE)
+        p = subprocess.Popen(["at", "now"], stdin=subprocess.PIPE)  # nosec B603 B607
         at_cmd = "%s run --fs-uuid '%s'" % (sys.argv[0], fs_uuid)
         logger.info(at_cmd)
         p.communicate(at_cmd.encode())
