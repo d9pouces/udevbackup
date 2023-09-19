@@ -1,0 +1,34 @@
+[build-system]
+build-backend = "poetry.core.masonry.api"
+requires = ["poetry-core"]
+
+[tool.poetry]
+authors = ["Matthieu Gallet <github@19pouces.net>"]
+classifiers = [
+    'Development Status :: 5 - Production/Stable',
+    'Operating System :: MacOS :: MacOS X',
+    'Operating System :: POSIX :: BSD',
+    'Operating System :: POSIX :: Linux',
+    'Operating System :: Unix',
+    'License :: OSI Approved :: CEA CNRS Inria Logiciel Libre License, version 2.1 (CeCILL-2.1)',
+    'Programming Language :: Python :: 3',
+    'Programming Language :: Python :: 3 :: Only',
+    'Programming Language :: Python :: 3.9',
+    'Programming Language :: Python :: 3.10',
+    'Programming Language :: Python :: 3.11'
+]
+description = "detects when specified storage devices are connected, mounts them, executes a script, umounts them and tells when it is done."
+documentation = 'https://github.com/d9pouces/udevbackup'
+license = "CeCILL-B"
+maintainers = ["Matthieu Gallet <github@19pouces.net>"]
+name = "udevbackup"
+packages = [{ include = "udevbackup" }]
+readme = "README.md"
+repository = 'https://github.com/d9pouces/udevbackup'
+version = "1.2.1"
+
+[tool.poetry.dependencies]
+python = "^3.9"
+systemlogger = "^0.1"
+termcolor = "^2.3"
+google-speech = "^1.2"
