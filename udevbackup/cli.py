@@ -5,17 +5,12 @@ import subprocess  # nosec B404
 import sys
 from configparser import ConfigParser
 
+from systemlogger import getLogger
 from termcolor import cprint
 
 from udevbackup.rule import Config, Rule
 
-try:
-    # noinspection PyUnresolvedReferences
-    from systemlogger import getLogger
-
-except ImportError:
-    from logging import getLogger
-logger = getLogger(name="udevbackup")
+logger = getLogger(name="udevbackup", extra_tags={"application_fqdn": "system"})
 
 
 def load_config(config_dir):

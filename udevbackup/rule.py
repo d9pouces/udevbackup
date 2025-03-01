@@ -15,13 +15,14 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from getpass import getuser
 from logging import ERROR, INFO, WARNING
-from tempfile import NamedTemporaryFile, mkdtemp, gettempdir
+from tempfile import NamedTemporaryFile, gettempdir, mkdtemp
 from typing import Union
 
 from google_speech import Speech
+from systemlogger import getLogger
 from termcolor import cprint
 
-logger = logging.getLogger("udevbackup")
+logger = getLogger(name="udevbackup", extra_tags={"application_fqdn": "system"})
 
 
 class Section:
@@ -61,7 +62,9 @@ class Section:
         for required_option in cls.required:
             if required_option in kwargs:
                 continue
-            raise ValueError("option %s is required in section [%s]" % (required_option, section))
+            raise ValueError(
+                "option %s is required in section [%s]" % (required_option, section)
+            )
         return kwargs
 
 
@@ -77,10 +80,12 @@ class Rule(Section):
         "stdout": "Write stdout to this filename.",
         "stderr": "Write stderr to this filename.",
         "mount_options": 'Extra mount options. Default to "".',
-        "user": "User used for running the script and mounting the disk." 'Default to "%s".' % getuser(),
+        "user": "User used for running the script and mounting the disk."
+        'Default to "%s".' % getuser(),
         "pre_script": "Script to run before mounting the disk. The disk will not be mounted if this script "
         'does not returns 0. Default to "".',
-        "post_script": "Script to run after the disk umount. Only run if the disk was mounted. " 'Default to "".',
+        "post_script": "Script to run after the disk umount. Only run if the disk was mounted. "
+        'Default to "".',
     }
     required = {"fs_uuid", "script"}
 
@@ -140,14 +145,22 @@ class Rule(Section):
         try:
             os.chown(self._mount_dir, uid=uid, gid=gid)
         except PermissionError:
-            self.errors.append("Unable to chown mount folder to %(user)s" % self.__dict__)
+            self.errors.append(
+                "Unable to chown mount folder to %(user)s" % self.__dict__
+            )
             return False
-        cmd = ["mount"] + self.mount_options + ["UUID=%s" % self.fs_uuid, self._mount_dir]
-        p = subprocess.Popen(cmd, stderr=self._stderr_fd, stdout=self._stdout_fd, stdin=subprocess.PIPE)
+        cmd = (
+            ["mount"] + self.mount_options + ["UUID=%s" % self.fs_uuid, self._mount_dir]
+        )
+        p = subprocess.Popen(
+            cmd, stderr=self._stderr_fd, stdout=self._stdout_fd, stdin=subprocess.PIPE
+        )
         try:
             p.communicate(b"")
         except Exception as e:
-            self.errors.append("Unable to mount the device using '%s': %s" % (" ".join(cmd), e))
+            self.errors.append(
+                "Unable to mount the device using '%s': %s" % (" ".join(cmd), e)
+            )
             return False
         if p.returncode != 0:
             self.errors.append("Unable to mount the device %(fs_uuid)s" % self.__dict__)
@@ -168,14 +181,23 @@ class Rule(Section):
             command = ["sudo", "-Hu", self.user] + self.command + [fd.name]
             try:
                 p = subprocess.Popen(
-                    command, cwd=cwd, stderr=self._stderr_fd, stdout=self._stdout_fd, stdin=subprocess.PIPE
+                    command,
+                    cwd=cwd,
+                    stderr=self._stderr_fd,
+                    stdout=self._stdout_fd,
+                    stdin=subprocess.PIPE,
                 )
             except Exception as e:
-                self.errors.append("Unable to execute script %(cmd)s (%(e)s)." % {"cmd": script_attr_name, "e": e})
+                self.errors.append(
+                    "Unable to execute script %(cmd)s (%(e)s)."
+                    % {"cmd": script_attr_name, "e": e}
+                )
                 return False
             p.communicate(b"")
             if p.returncode != 0:
-                self.errors.append("Unable to execute script %(cmd)s." % {"cmd": script_attr_name})
+                self.errors.append(
+                    "Unable to execute script %(cmd)s." % {"cmd": script_attr_name}
+                )
                 return False
             return True
 
@@ -183,7 +205,10 @@ class Rule(Section):
         was_mounted = self._is_mounted
         if was_mounted:
             p = subprocess.Popen(
-                ["umount", self._mount_dir], stderr=self._stderr_fd, stdout=self._stdout_fd, stdin=subprocess.PIPE
+                ["umount", self._mount_dir],
+                stderr=self._stderr_fd,
+                stdout=self._stdout_fd,
+                stdin=subprocess.PIPE,
             )
             p.communicate(b"")
             if p.returncode != 0:
@@ -211,7 +236,8 @@ class Config(Section):
         "smtp_server": 'SMTP server. Default to "localhost".',
         "smtp_from_email": 'E-mail address for the FROM: value. Default to "".',
         "smtp_to_email": "Recipient of the e-mail. Required to send e-mails.",
-        "log_file": "Name of the global log file. Default to %s/udevbackup.log" % gettempdir(),
+        "log_file": "Name of the global log file. Default to %s/udevbackup.log"
+        % gettempdir(),
     }
     bool_options = {
         "use_speech": "Use google speech for announcing successes and failures. Default to 0.",
@@ -364,7 +390,10 @@ class Config(Section):
             cprint("command to execute: ", "green")
             cmd = " ".join(shlex.quote(x) for x in rule.command)
             cprint("MOUNT_POINT=[mount point]")
-            cprint("cat << EOF > [tmpfile] ; sudo -Hu %s %s [tmpfile]\n%s\nEOF" % (rule.user, cmd, rule.script))
+            cprint(
+                "cat << EOF > [tmpfile] ; sudo -Hu %s %s [tmpfile]\n%s\nEOF"
+                % (rule.user, cmd, rule.script)
+            )
         if not self.rules:
             cprint("Please create a .ini file in the config dir", "red")
 
@@ -414,4 +443,6 @@ class Config(Section):
 
             smtp.sendmail(self.smtp_from_email, [self.smtp_to_email], msg.as_string())
         except Exception as e:
-            self.log_text("Unable to send mail to %s: %s." % (self.smtp_to_email, e), level=INFO)
+            self.log_text(
+                "Unable to send mail to %s: %s." % (self.smtp_to_email, e), level=INFO
+            )
