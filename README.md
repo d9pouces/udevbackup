@@ -16,17 +16,24 @@ Require the "at" utility for running long jobs (more than 30 seconds).
 installation
 ------------
 
-    sudo pip3 install udevbackup --upgrade
+```bash
+pipx install udevbackup
+
+```
 
 you need to create a udev rule to launch udevbackup when a new device (with a file system) is connected:
 
+```bash
     echo 'ACTION=="add", ENV{DEVTYPE}=="partition", RUN+="/usr/local/bin/udevbackup at"' | sudo tee /etc/udev/rules.d/udevbackup.rules
     udevadm control --reload-rules
+```
 
-If you only have short jobs, you can use
+If you only have short jobs (less than 30s), you can use:
 
+```bash
     echo 'ACTION=="add", ENV{DEVTYPE}=="partition", RUN+="/usr/local/bin/udevbackup run"' | sudo tee /etc/udev/rules.d/udevbackup.rules
     udevadm control --reload-rules
+```
 
 configuration
 -------------
@@ -35,9 +42,9 @@ Create a .ini config file with a "main" section for global options, and another 
 target partition. The name is not important. All .ini files in /etc/udevbackup are read.
 These files must use the UTF-8 encoding.
 
-You can display all available options with the "help" command, but .
+You can display all available options through an example of config file with the "example" command.
 
-    udevbackup help
+    udevbackup example
 
     Create one or more .ini files in /etc/udevbackup.
     Yellow lines are mandatory.
@@ -76,7 +83,7 @@ Here is a complete example:
     use_stdout = 0
     use_smtp = 1
 
-    [example]
+    [my_config]
     fs_uuid = 58EE-7CAE
     script = mkdir -p ./data
         rsync -av /data/to_backup/ ./data/
