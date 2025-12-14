@@ -15,7 +15,7 @@ logger = getLogger(name="udevbackup", extra_tags={"application_fqdn": "system"})
 
 def load_config(config_dir):
     """Load the configuration."""
-    config_filenames = glob.glob("%s/*.ini" % config_dir)
+    config_filenames = glob.glob(f"{config_dir}/*.ini")
     parser = ConfigParser()
     parser.read(config_filenames, encoding="utf-8")
     config_section = Config.section_name
@@ -27,6 +27,7 @@ def load_config(config_dir):
         kwargs = Rule.load(parser, section)
         rule = Rule(config, section, **kwargs)
         config.register(rule)
+    config.identify_cryptodevices()
     return config
 
 
@@ -52,14 +53,8 @@ def main():
         help="Configuration directory (default: /etc/udevbackup)",
     )
     parser.add_argument(
-        "--fork",
-        action="store_true",
-        default=False,
-        help="fork",
-    )
-    parser.add_argument(
         "--fs-uuid",
-        default=None,
+        default=os.environ.get("ID_FS_UUID"),
         help="If not specified, use the ID_FS_UUID environment variable.",
     )
     args = parser.parse_args()
@@ -74,32 +69,29 @@ def main():
     elif args.command == "show":
         config.show()
     elif args.command == "at":
-        fs_uuid = args.fs_uuid or os.environ.get("ID_FS_UUID", "")
-        if not fs_uuid:
+        if not args.fs_uuid:
             logger.error(
-                "No filesystem uuid provided: please use --fs-uuid or set ID_FS_UUID environment variable"
+                "No filesystem uuid provided: use --fs-uuid or set the ID_FS_UUID environment variable"
             )
             return_code = 1
         else:
-            p = subprocess.Popen(
-                ["at", "now"], stdin=subprocess.PIPE
-            )  # nosec B603 B607
-            at_cmd = "%s run --fs-uuid '%s'" % (sys.argv[0], fs_uuid)
+            at_cmd = f"{sys.argv[0]} run --fs-uuid '{args.fs_uuid}'"
             logger.info(at_cmd)
+            cmd = ["at", "now"]
+            p = subprocess.Popen(cmd, stdin=subprocess.PIPE)  # nosec B603 B607
             p.communicate(at_cmd.encode())
     elif args.command == "run":
-        fs_uuid = args.fs_uuid or os.environ.get("ID_FS_UUID", "")
-        if not fs_uuid:
+        if not args.fs_uuid:
             logger.error(
-                "No filesystem uuid provided: please use --fs-uuid or set ID_FS_UUID environment variable"
+                "No filesystem uuid provided: use --fs-uuid or set ID_FS_UUID environment variable"
             )
             return_code = 1
         else:
-            logger.info(f"{fs_uuid} detected")
-            config.run(fs_uuid, fork=args.fork)
+            logger.info(f"{args.fs_uuid} detected")
+            config.run(args.fs_uuid)
     elif args.command == "example":
         Config.show_rule_file()
-        cprint("Create one or more .ini files in %s." % args.config_dir)
+        cprint(f"Create one or more .ini files in {args.config_dir}.")
         cprint("Yellow lines are mandatory.")
         Config.print_help(Config.section_name)
         cprint("")

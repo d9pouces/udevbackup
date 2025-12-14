@@ -1,31 +1,28 @@
-import logging
 import os
+import pathlib
 import platform
 import pwd
 import shlex
 import smtplib
 import subprocess
 import sys
+import tempfile
 import time
-from collections import OrderedDict
 from configparser import ConfigParser
 from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from getpass import getuser
 from logging import ERROR, INFO, WARNING
-from tempfile import NamedTemporaryFile, gettempdir, mkdtemp
-from typing import Union
 
-from google_speech import Speech
+import fasteners
 from systemlogger import getLogger
 from termcolor import cprint
 
 logger = getLogger(name="udevbackup", extra_tags={"application_fqdn": "system"})
 
 
-class Section:
+class ConfigSection:
     text_options = {}
     bool_options = {}
     int_options = {}
@@ -33,16 +30,18 @@ class Section:
     required = set()
 
     @classmethod
-    def print_help(cls, section):
-        cprint("[%s]" % section, "yellow")
+    def print_help(cls, section: str):
+        cprint(f"[{section}]", "yellow")
         all_values = {}
         all_values.update(cls.text_options)
         all_values.update(cls.bool_options)
         all_values.update(cls.int_options)
         all_values.update(cls.float_options)
-        for k, v in all_values.items():
-            color = "yellow" if k in cls.required else "green"
-            cprint("%s = %s" % (k, v), color)
+        for k, v in sorted(all_values.items()):
+            if k in cls.required:
+                cprint(f"{k} = {v}", "yellow")
+            else:
+                cprint(f"{k} = {v}", "green")
 
     @classmethod
     def load(cls, parser: ConfigParser, section: str):
@@ -58,30 +57,28 @@ class Section:
                 elif option in cls.float_options:
                     kwargs[option] = parser.getfloat(section, option)
                 else:
-                    raise ValueError("Unrecognized option [%s] %s" % (section, option))
+                    raise ValueError(f"Unrecognized option [{section}] {option}")
         for required_option in cls.required:
             if required_option in kwargs:
                 continue
             raise ValueError(
-                "option %s is required in section [%s]" % (required_option, section)
+                f"option {required_option} is required in section [{section}]"
             )
         return kwargs
 
 
-class Rule(Section):
+class Rule(ConfigSection):
     text_options = {
-        "fs_uuid": "UUID of the used file system. "
-        "Check /dev/disk/by-uuid/ before and after having connected your disk to get it.",
-        "command": "Command to call for running the script (whose name is passed as first argument). "
-        'Default to "bash".',
+        "fs_uuid": "UUID of the used file system.",
+        "luks_uuid": "UUID of the LUKS partition (a key must be provided in the /etc/crypttab file).",
+        "command": 'Command running the script (whose name is passed as first argument). Default to "bash".',
         "script": "Content of the script to execute when the disk is mounted. "
-        "Current working dir is always the mounted directory."
+        "Working dir is the mounted directory."
         "This script will be copied in a temporary file, whose name is passed to the command.",
         "stdout": "Write stdout to this filename.",
         "stderr": "Write stderr to this filename.",
         "mount_options": 'Extra mount options. Default to "".',
-        "user": "User used for running the script and mounting the disk."
-        'Default to "%s".' % getuser(),
+        "user": "User used for running the script and mounting the disk.",
         "pre_script": "Script to run before mounting the disk. The disk will not be mounted if this script "
         'does not returns 0. Default to "".',
         "post_script": "Script to run after the disk umount. Only run if the disk was mounted. "
@@ -92,130 +89,111 @@ class Rule(Section):
     def __init__(
         self,
         config,
-        name,
+        name: str,
         fs_uuid: str,
         script: str,
+        luks_uuid: str | None = None,
         command: str = "bash",
-        user: str = getuser(),
-        stdout: str = "%(tmp)s/%(name)s.out",
-        stderr: str = "%(tmp)s/%(name)s.err",
+        user: str | None = None,
+        stdout: str = "%(tmp)s/%(name)s.out.txt",
+        stderr: str = "%(tmp)s/%(name)s.err.txt",
         mount_options: str = "",
-        pre_script: Union[str, None] = None,
-        post_script: Union[str, None] = None,
+        pre_script: str | None = None,
+        post_script: str | None = None,
     ):
-        self.config = config
-        self.name = name
-        self.errors = []
-        self.fs_uuid = fs_uuid
-        self.script = script
-        self.pre_script = pre_script
-        self.post_script = post_script
-        self.command = shlex.split(command)
-        self.user = user
-        self.mount_options = shlex.split(mount_options)
-        self.stdout = stdout % {"name": self.name, "tmp": gettempdir()}
-        self.stderr = stderr % {"name": self.name, "tmp": gettempdir()}
-        self._is_mounted = False
-        self._mount_dir = None
+        self.config: Config = config
+        self.name: str = name
+        self.errors: list[str] = []
+        self.fs_uuid: str = fs_uuid
+        self.luks_uuid: str | None = luks_uuid
+        self.luks_name: str | None = None
+        self.script: str = script
+        self.pre_script: str | None = pre_script
+        self.post_script: str | None = post_script
+        self.command: list[str] = shlex.split(command)
+        self.user: str | None = user
+        self.mount_options: list[str] = shlex.split(mount_options)
+        self.stdout_path: str = stdout % {
+            "name": self.name,
+            "tmp": config.temp_directory,
+        }
+        self.stderr_path: str = stderr % {
+            "name": self.name,
+            "tmp": config.temp_directory,
+        }
+        self._is_mounted: bool = False
+        self._is_luks_opened: bool = False
+        self._mount_dir: str | None = None
         self._stdout_fd = None
         self._stderr_fd = None
 
     def execute(self):
         self.set_up()
-        if self._is_mounted:
-            self.backup()
+        if not self.errors:
+            self.execute_script("script", cwd=self._mount_dir)
         self.tear_down()
 
     def set_up(self):
         try:
-            self._stdout_fd = open(self.stdout, "wb")
+            self._stdout_fd = open(self.stdout_path, "wb")
         except Exception as e:
-            self.errors.append("Unable to open %s (%s)." % (self.stdout, e))
+            self.errors.append(f"Unable to open {self.stdout_path} ({e}).")
             return False
         try:
-            self._stderr_fd = open(self.stderr, "wb")
+            self._stderr_fd = open(self.stderr_path, "wb")
         except Exception as e:
-            self.errors.append("Unable to open %s (%s)." % (self.stderr, e))
+            self.errors.append(f"Unable to open {self.stderr_path} ({e}).")
             return False
         if not self.execute_script("pre_script", cwd=None):
             return False
-        self._mount_dir = mkdtemp(prefix="%s-" % self.fs_uuid)
-        uid = pwd.getpwnam(self.user).pw_uid
-        gid = pwd.getpwnam(self.user).pw_gid
-        try:
-            os.chown(self._mount_dir, uid=uid, gid=gid)
-        except PermissionError:
-            self.errors.append(
-                "Unable to chown mount folder to %(user)s" % self.__dict__
-            )
-            return False
-        cmd = (
-            ["mount"] + self.mount_options + ["UUID=%s" % self.fs_uuid, self._mount_dir]
-        )
-        p = subprocess.Popen(
-            cmd, stderr=self._stderr_fd, stdout=self._stdout_fd, stdin=subprocess.PIPE
-        )
-        try:
-            p.communicate(b"")
-        except Exception as e:
-            self.errors.append(
-                "Unable to mount the device using '%s': %s" % (" ".join(cmd), e)
-            )
-            return False
-        if p.returncode != 0:
-            self.errors.append("Unable to mount the device %(fs_uuid)s" % self.__dict__)
-            return False
-        self._is_mounted = True
-        return True
 
-    def backup(self) -> bool:
-        return self.execute_script("script", cwd=self._mount_dir)
+        if self.luks_uuid and self.luks_name:
+            cmd = ["cryptdisks_start", self.luks_name]
+            if not self.execute_command(cmd):
+                self.errors.append(f"Unable to open LUKS device {self.luks_uuid}")
+                return False
+            self._is_luks_opened = True
+            timeout = time.time() + self.config.luks_open_timeout
+            while not (
+                self.config.devices_root / "disk" / "by-uuid" / self.fs_uuid
+            ).exists():
+                if time.time() > timeout:
+                    self.errors.append(
+                        f"Timeout waiting for device {self.fs_uuid} after opening LUKS"
+                    )
+                    return False
+                time.sleep(0.5)
 
-    def execute_script(self, script_attr_name, cwd=None):
-        script_content = getattr(self, script_attr_name)
-        if not script_content:
-            return True
-        with NamedTemporaryFile() as fd:
-            fd.write(script_content.encode())
-            fd.flush()
-            command = ["sudo", "-Hu", self.user] + self.command + [fd.name]
+        self._mount_dir = tempfile.mkdtemp(
+            prefix=f"{self.config.temp_prefix}_{self.fs_uuid}-"
+        )
+        if self.user:
             try:
-                p = subprocess.Popen(
-                    command,
-                    cwd=cwd,
-                    stderr=self._stderr_fd,
-                    stdout=self._stdout_fd,
-                    stdin=subprocess.PIPE,
-                )
-            except Exception as e:
-                self.errors.append(
-                    "Unable to execute script %(cmd)s (%(e)s)."
-                    % {"cmd": script_attr_name, "e": e}
-                )
+                uid: int = pwd.getpwnam(self.user).pw_uid
+                gid: int = pwd.getpwnam(self.user).pw_gid
+                os.chown(self._mount_dir, uid=uid, gid=gid)
+            except KeyError:
+                self.errors.append(f"Unable to get info for user '{self.user}'")
                 return False
-            p.communicate(b"")
-            if p.returncode != 0:
-                self.errors.append(
-                    "Unable to execute script %(cmd)s." % {"cmd": script_attr_name}
-                )
+            except PermissionError:
+                self.errors.append(f"Unable to chown mount directory to '{self.user}'")
                 return False
-            return True
+
+        if self.execute_command(
+            ["mount"] + self.mount_options + [f"UUID={self.fs_uuid}", self._mount_dir]
+        ):
+            self._is_mounted = True
+        return self._is_mounted
 
     def tear_down(self):
         was_mounted = self._is_mounted
         if was_mounted:
-            p = subprocess.Popen(
-                ["umount", self._mount_dir],
-                stderr=self._stderr_fd,
-                stdout=self._stdout_fd,
-                stdin=subprocess.PIPE,
-            )
-            p.communicate(b"")
-            if p.returncode != 0:
-                self.errors.append("Unable to umount %(fs_uuid)s" % self.__dict__)
-            else:
+            if self.execute_command(["umount", self._mount_dir]):
                 self._is_mounted = False
-        if self._mount_dir:
+        if self._is_luks_opened and not self._is_mounted:
+            if self.execute_command(["cryptsetup", "close", self.luks_name]):
+                self._is_luks_opened = False
+        if self._mount_dir and not self._is_mounted:
             os.rmdir(self._mount_dir)
             self._mount_dir = None
         if was_mounted:
@@ -225,82 +203,203 @@ class Rule(Section):
         if self._stdout_fd:
             self._stdout_fd.close()
 
+    def execute_script(self, script_attr_name: str, cwd: str = None) -> bool:
+        script_content = getattr(self, script_attr_name)
+        if not script_content:
+            return True
+        with tempfile.NamedTemporaryFile(
+            prefix=f"{self.config.temp_prefix}_{self.fs_uuid}-{script_attr_name}"
+        ) as fd:
+            fd.write(script_content.encode())
+            fd.flush()
+            if self.user:
+                command = ["sudo", "-Hu", self.user] + self.command + [fd.name]
+            else:
+                command = self.command + [fd.name]
+            return self.execute_command(command, cwd=cwd, attr_name=script_attr_name)
 
-class Config(Section):
-    udev_rule = 'ACTION=="add", ENV{DEVTYPE}=="partition", RUN+="%s at"' % sys.argv[0]
+    def execute_command(
+        self, command: list[str], cwd: str | None = None, attr_name: str | None = None
+    ) -> bool:
+        title = attr_name or " ".join(command)
+        ret_code = -1
+        self.config.log_text(f"Executing command {title}", INFO)
+        try:
+            p = subprocess.Popen(
+                command,
+                cwd=cwd,
+                stderr=self._stderr_fd,
+                stdout=self._stdout_fd,
+                stdin=subprocess.PIPE,
+            )
+            p.communicate(b"")
+            ret_code = p.returncode
+            if ret_code != 0:
+                self.errors.append(f"Unable to execute command {title}.")
+        except Exception as e:
+            self.errors.append(f"Unable to execute command {title} ({e}).")
+        return ret_code == 0
+
+
+class Config(ConfigSection):
+    udev_rule = f'ACTION=="add", ENV{{DEVTYPE}}=="partition", RUN+="{sys.argv[0]} at"'
+    udev_rule_path = pathlib.Path("/etc/udev/rules.d/udevbackup.rules")
+
     section_name = "main"
-    lang = "en"
     text_options = {
         "smtp_auth_user": 'SMTP user. Default to "".',
         "smtp_auth_password": 'SMTP password. Default to "".',
         "smtp_server": 'SMTP server. Default to "localhost".',
         "smtp_from_email": 'E-mail address for the FROM: value. Default to "".',
         "smtp_to_email": "Recipient of the e-mail. Required to send e-mails.",
-        "log_file": "Name of the global log file. Default to %s/udevbackup.log"
-        % gettempdir(),
+        "log_file": "Name of the global log file.",
+        "lock_file": "Name of a global lock file to avoid parallel runs.",
     }
     bool_options = {
-        "use_speech": "Use google speech for announcing successes and failures. Default to 0.",
         "use_stdout": "Display messages on stdout. Default to 0.",
         "use_smtp": "Send messages by email (with the whole content of stdout/stderr of your scripts). "
         "Default to 0.",
-        "use_log_file": "Write all errors to this file. Default to 1.",
+        "use_log_file": "Write all errors to the log file. Default to 1.",
         "smtp_use_tls": "Use TLS (smtps) for emails. Default to 0.",
         "smtp_use_starttls": "Use STARTTLS for emails. Default to 0.",
     }
     int_options = {"smtp_smtp_port": "The SMTP port. Default to 25."}
-    udev_rule_filename = "/etc/udev/rules.d/udevbackup.rules"
 
     def __init__(
         self,
-        smtp_auth_user: Union[str, None] = None,
-        smtp_auth_password: Union[str, None] = None,
+        smtp_auth_password: str | None = None,
+        smtp_auth_user: str | None = None,
+        smtp_from_email: str | None = None,
         smtp_server: str = "localhost",
         smtp_smtp_port: int = 25,
-        smtp_use_tls: bool = False,
+        smtp_to_email: str | None = None,
         smtp_use_starttls: bool = False,
-        smtp_to_email: Union[str, None] = None,
-        smtp_from_email: Union[str, None] = None,
-        use_speech: bool = False,
+        smtp_use_tls: bool = False,
         use_stdout: bool = False,
         use_smtp: bool = False,
         use_log_file: bool = True,
-        log_file: str = "%s/udevbackup.log" % gettempdir(),
+        log_file: str | None = None,
+        lock_file: str | None = None,
     ):
-        self.smtp_auth_user = smtp_auth_user
-        self.smtp_auth_password = smtp_auth_password
-        self.smtp_server = smtp_server
-        self.smtp_smtp_port = smtp_smtp_port
-        self.smtp_use_tls = smtp_use_tls
-        self.smtp_use_starttls = smtp_use_starttls
-        self.smtp_from_email = smtp_from_email or "root@%s" % (platform.node())
-        self.smtp_to_email = smtp_to_email
-        self.use_speech = use_speech
-        self.use_stdout = use_stdout
+
         self.use_smtp = use_smtp
-        self.log_file = log_file
-        self.use_log_file = use_log_file
-        self.rules = OrderedDict()  # rules[fs_uuid] = Rule()
-        self._log_content = ""
+        self.smtp_auth_password: str | None = smtp_auth_password
+        self.smtp_auth_user: str | None = smtp_auth_user
+        self.smtp_from_email: str = smtp_from_email or f"root@{platform.node()}"
+        self.smtp_server: str | None = smtp_server
+        self.smtp_smtp_port: int = smtp_smtp_port
+        self.smtp_to_email: str | None = smtp_to_email
+        self.smtp_use_starttls: bool = smtp_use_starttls
+        self.smtp_use_tls: bool = smtp_use_tls
+
+        self.use_stdout: bool = use_stdout
+
+        self.use_log_file: bool = use_log_file
+        self.log_file: str | None = log_file
+
+        self.lock_file: fasteners.InterProcessLock | None = None
+        if lock_file:
+            self.lock_file = fasteners.InterProcessLock(lock_file)
+
+        self.rules: dict[str, Rule] = {}  # rules[fs_uuid] = Rule()
+
+        self._log_content: str = ""
+
+        self.temp_prefix: str = "udevbackup_"
+        # these constants simplify tests
+        self.devices_root: pathlib.Path = pathlib.Path("/dev/disk")
+        self.crypttab: pathlib.Path = pathlib.Path("/etc/crypttab")
+        self.temp_directory: pathlib.Path = pathlib.Path(tempfile.gettempdir())
+        self.luks_open_timeout: float = 300.0  # seconds
+        self.stdout = sys.stdout
+        self.stderr = sys.stderr
 
     def register(self, rule: Rule):
-        self.rules[rule.fs_uuid] = rule
+        self.rules[rule.luks_uuid or rule.fs_uuid] = rule
 
-    def run(self, fs_uuid: str, fork=True):
-        if fs_uuid not in self.rules:
-            return
-        rule = self.rules[fs_uuid]
-        assert isinstance(rule, Rule)
-        if fork and not self.fork():
-            return
-        self.log_text("Device %s is connected." % fs_uuid, level=INFO)
+    def identify_cryptodevices(self):
+        """Parse /etc/crypttab to get the mapping between LUKS UUID and name."""
+        luks_names = self.get_luks_names()
+        for rule in self.rules.values():
+            rule.luks_name = luks_names.get(rule.luks_uuid)
+
+    def get_luks_names(self) -> dict[str, str]:
+        content = ""
+        if not self.crypttab.is_file():
+            return {}
         try:
-            rule.set_up()
-            if not rule.errors:
-                rule.backup()
-            rule.tear_down()
+            with self.crypttab.open("r") as fd:
+                content = fd.read()
+        except PermissionError:
+            self.log_text(
+                "Unable to read /etc/crypttab (permission denied).", level=WARNING
+            )
+        return self.parse_crypttab(content)
+
+    def parse_crypttab(self, content: str) -> dict[str, str]:
+        aliases = self.load_device_aliases()
+        luks_uuid_to_luks_name: dict[str, str] = {}
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            name = parts[0]
+            device = parts[1]
+            key = parts[2]
+            if device in aliases and key != "none":
+                luks_uuid_to_luks_name[aliases[device]] = name
+        return luks_uuid_to_luks_name
+
+    def load_device_aliases(self) -> dict[str, str]:
+        synonyms: dict[str, str] = {}
+        dev_to_uuid: dict[str, str] = {}
+        if not (self.devices_root / "disk" / "by-uuid").is_dir():
+            return synonyms
+        for dev_uuid in pathlib.Path(self.devices_root / "disk" / "by-uuid").iterdir():
+            if dev_uuid.is_symlink():
+                device = str(dev_uuid.resolve())
+                synonyms[f"UUID={dev_uuid.name}"] = dev_uuid.name
+                synonyms[device] = dev_uuid.name
+                dev_to_uuid[device] = dev_uuid.name
+        for method in ("PARTUUID", "PARTLABEL", "LABEL"):
+            root = pathlib.Path(self.devices_root / "disk" / f"by-{method.lower()}")
+            if not root.is_dir():
+                continue
+            for dev_part in root.iterdir():
+                if dev_part.is_symlink():
+                    device = str(dev_part.resolve())
+                    if device in dev_to_uuid:
+                        uuid = dev_to_uuid[device]
+                        synonyms[f"{method}={dev_part.name}"] = uuid
+        return synonyms
+
+    def run(self, fs_uuid: str):
+        if fs_uuid not in self.rules:
+            # no message: we don't want a message everytime a device is connected
+            return
+        rule: Rule = self.rules[fs_uuid]
+
+        self.log_text(f"Device {fs_uuid} is connected.", level=INFO)
+        try:
+            if self.lock_file:
+                self.log_text(
+                    f"Waiting for {self.lock_file.path.decode()}.", level=INFO
+                )
+                with self.lock_file:
+                    self.log_text(
+                        f"{self.lock_file.path.decode()} acquired.", level=INFO
+                    )
+                    rule.execute()
+                    self.log_text(
+                        f"{self.lock_file.path.decode()} release.", level=INFO
+                    )
+            else:
+                rule.execute()
         except Exception as e:
-            self.log_text("An error happened: %s." % e)
+            self.log_text(f"An error happened: {e}.")
         if rule.errors:
             self.log_text("An error happened.", level=ERROR)
             for error in rule.errors:
@@ -308,7 +407,7 @@ class Config(Section):
         else:
             self.log_text("Successful.", level=INFO)
         if self.use_smtp:
-            subject = "%s" % rule.name
+            subject = str(rule.name)
             if rule.errors:
                 subject += " [KO]"
             else:
@@ -316,96 +415,103 @@ class Config(Section):
             self.send_email(
                 self._log_content,
                 subject=subject,
-                attachments=[rule.stdout, rule.stderr],
+                attachments=[rule.stdout_path, rule.stderr_path],
             )
-
-        c = 0
-        while os.path.exists("/dev/disk/by-uuid/%s" % rule.fs_uuid):
-            if c % 600 == 0:
-                self.log_text("Please disconnect the device.", level=INFO)
-            c += 1
-            time.sleep(0.1)
-        if self.use_stdout:
-            cprint(self._log_content)
+        self.log_text(f"Device {fs_uuid} can be disconnected.", level=INFO)
 
     def log_text(self, text, level=INFO):
-        if self.use_speech:
-            try:
-                Speech(text, self.lang).play([])
-            except KeyboardInterrupt:
-                pass
-            except Exception as e:
-                text += "\nERROR: Unable to use text to speech (%s)\n" % e
         if self.use_log_file:
+            log_filepath = self.log_file or self.temp_directory / "udevbackup.log"
             try:
-                with open(self.log_file, "a") as fd:
-                    fd.write("%s\n" % text)
+                with open(log_filepath, "a") as fd:
+                    fd.write(f"{text}\n")
             except Exception as e:
-                text += "\nERROR: Unable to use append text to %s (%s)\n" % (
-                    self.log_file,
-                    e,
-                )
+                text += f"\nERROR: Unable to use append text to {log_filepath} ({e})\n"
         logger.log(level, text)
         if self.use_stdout:
-            color = "green"
-            if level >= WARNING:
-                color = "yellow"
             if level >= ERROR:
-                color = "red"
-            cprint(text, color)
+                cprint(text, "red", file=self.stderr, force_color=True)
+            elif level >= WARNING:
+                cprint(text, "yellow", file=self.stderr, force_color=True)
+            else:
+                cprint(text, "green", file=self.stdout, force_color=True)
         self._log_content += text
         self._log_content += "\n"
 
-    @staticmethod
-    def fork():
-        os.closerange(0, 65535)  # just in case
-        wpid = os.fork()
-        if wpid != 0:
-            time.sleep(0.1)  # get forked process chance to change cgroup
-            return False
-        wpid = os.fork()
-        if wpid != 0:
-            time.sleep(0.1)
-            return False
-        with open("/sys/fs/cgroup/cpu/tasks", "a+") as fd:
-            fd.write(str(os.getpid()))
-        time.sleep(3)  # defer execution by XX seconds
-        # YOUR CODE GOES HERE
-        sys.stdout.flush()
-        sys.stderr.flush()
-        sys.stdout = open("/dev/null", "w")
-        sys.stderr = open("/dev/null", "w")
-        sys.stdin = open("/dev/null", "r")
-        return True
-
     def show(self):
-        self.show_rule_file()
+        self.show_rule_file(stdout=self.stdout, stderr=self.stderr)
         for rule in self.rules.values():
-            cprint("[%s]" % rule.name, "yellow")
-            cprint("file system uuid: %s" % rule.fs_uuid, "green")
-            cprint("extra mount options: %s" % " ".join(rule.mount_options), "green")
-            cprint("mounted file system will be chowned to: %s" % rule.user, "green")
-            cprint("stdout will be written to: %s" % rule.stdout, "green")
-            cprint("stderr will be written to: %s" % rule.stderr, "green")
-            cprint("command to execute: ", "green")
+            options = " ".join(rule.mount_options)
             cmd = " ".join(shlex.quote(x) for x in rule.command)
-            cprint("MOUNT_POINT=[mount point]")
+            cprint(f"[{rule.name}]", "yellow", force_color=True, file=self.stdout)
             cprint(
-                "cat << EOF > [tmpfile] ; sudo -Hu %s %s [tmpfile]\n%s\nEOF"
-                % (rule.user, cmd, rule.script)
+                f"file system uuid: {rule.fs_uuid}",
+                "green",
+                force_color=True,
+                file=self.stdout,
             )
+            cprint(
+                f"extra mount options: {options}",
+                "green",
+                force_color=True,
+                file=self.stdout,
+            )
+            if rule.user:
+                cprint(
+                    f"mounted file system will be chowned to: {rule.user}",
+                    "green",
+                    force_color=True,
+                    file=self.stdout,
+                )
+            cprint(
+                f"stdout will be written to: {rule.stdout_path}",
+                "green",
+                force_color=True,
+                file=self.stdout,
+            )
+            cprint(
+                f"stderr will be written to: {rule.stderr_path}",
+                "green",
+                force_color=True,
+                file=self.stdout,
+            )
+            cprint("command to execute: ", "green", force_color=True, file=self.stdout)
+            cprint("MOUNT_POINT=[mount point]", force_color=True, file=self.stdout)
+            if rule.user:
+                cprint(
+                    f"cat << EOF > [tmpfile] ; sudo -Hu {rule.user} {cmd} [tmpfile]\n{rule.script}\nEOF",
+                    force_color=True,
+                    file=self.stdout,
+                )
+            else:
+                cprint(
+                    f"cat << EOF > [tmpfile] ; {cmd} [tmpfile]\n{rule.script}\nEOF",
+                    force_color=True,
+                    file=self.stdout,
+                )
         if not self.rules:
-            cprint("Please create a .ini file in the config dir", "red")
+            cprint(
+                "Please create a 'rule.ini' file in the config dir.",
+                "red",
+                force_color=True,
+                file=self.stderr,
+            )
 
     @classmethod
-    def show_rule_file(cls):
-        if not os.path.isfile(cls.udev_rule_filename):
-            cprint("Please run the following commands: ")
+    def show_rule_file(cls, stdout=sys.stdout, stderr=sys.stderr):
+        if not cls.udev_rule_path.is_file():
             cprint(
-                "echo '%s' | sudo tee %s" % (cls.udev_rule, cls.udev_rule_filename),
-                "green",
+                "A udev rule must be added first.", "red", file=stderr, force_color=True
             )
-            cprint("udevadm control --reload-rules", "green")
+            cprint(
+                f"echo '{cls.udev_rule}' | sudo tee {cls.udev_rule_path}",
+                "green",
+                file=stdout,
+                force_color=True,
+            )
+            cprint(
+                "udevadm control --reload-rules", "green", file=stdout, force_color=True
+            )
 
     def send_email(self, content, subject=None, attachments=None):
         try:
@@ -437,12 +543,12 @@ class Config(Section):
                     encoders.encode_base64(part)
                     part.add_header(
                         "Content-Disposition",
-                        "attachment; filename= %s" % os.path.basename(attachment),
+                        f"attachment; filename= {os.path.basename(attachment)}",
                     )
                     msg.attach(part)
 
             smtp.sendmail(self.smtp_from_email, [self.smtp_to_email], msg.as_string())
         except Exception as e:
             self.log_text(
-                "Unable to send mail to %s: %s." % (self.smtp_to_email, e), level=INFO
+                f"Unable to send mail to {self.smtp_to_email}: {e}.", level=INFO
             )

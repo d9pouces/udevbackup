@@ -6,18 +6,14 @@ requires = ["poetry-core"]
 authors = ["Matthieu Gallet <github@19pouces.net>"]
 classifiers = [
   'Development Status :: 5 - Production/Stable',
-  'Operating System :: MacOS :: MacOS X',
-  'Operating System :: POSIX :: BSD',
   'Operating System :: POSIX :: Linux',
-  'Operating System :: Unix',
   'License :: OSI Approved :: CEA CNRS Inria Logiciel Libre License, version 2.1 (CeCILL-2.1)',
   'Programming Language :: Python :: 3',
   'Programming Language :: Python :: 3 :: Only',
-  'Programming Language :: Python :: 3.9',
-  'Programming Language :: Python :: 3.10',
   'Programming Language :: Python :: 3.11',
   'Programming Language :: Python :: 3.12',
-  'Programming Language :: Python :: 3.13'
+  'Programming Language :: Python :: 3.13',
+  'Programming Language :: Python :: 3.14'
 ]
 description = "detects when specified storage devices are connected, mounts them, executes a script, umounts them and tells when it is done."
 documentation = 'https://github.com/d9pouces/udevbackup'
@@ -27,13 +23,18 @@ name = "udevbackup"
 packages = [{include = "udevbackup"}]
 readme = "README.md"
 repository = 'https://github.com/d9pouces/udevbackup'
-version = "1.3.0"
+version = "1.4.0"
 
 [tool.poetry.dependencies]
-google-speech = "^1.2"
-python = "^3.9"
+black = "^25.12.0"
+fasteners = "^0.20"
+python = "^3.11"
 systemlogger = "^0.2.2"
 termcolor = "^2.5.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^9.0.2"
+pytest-cov = "^7.0.0"
 
 [tool.poetry.scripts]
 udevbackup = 'udevbackup.cli:main'
