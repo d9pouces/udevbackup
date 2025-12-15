@@ -63,6 +63,8 @@ class TestConfig(Config):
         self.logger_content: list[tuple[int, str]] = []
         self.popen_commands_full: list[list[str]] = []
         self.popen_commands_short: list[str] = []
+        self.popen_result: dict[str, int | Exception] = {}
+        self.popen_inputs: list[bytes | None] = []
         self.stdout = io.StringIO()
         self.stderr = io.StringIO()
         self.luks_open_timeout = 0.2
@@ -153,9 +155,15 @@ class FakePopen:
         self.stdin = stdin
         self.returncode = 0
 
-    def communicate(self, data: bytes = None):
+    def communicate(self, data: bytes | None = None):
         self.config.popen_commands_full.append(self.command)
         self.config.popen_commands_short.append(self.command[0])
+        self.config.popen_inputs.append(data)
+        if self.command[0] in self.config.popen_result:
+            result = self.config.popen_result[self.command[0]]
+            if isinstance(result, Exception):
+                raise result
+            self.returncode = result
         if self.command[0] == "cryptdisks_start":
             self.config.prepare_device("luksed")
         return None, None

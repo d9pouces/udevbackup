@@ -245,7 +245,7 @@ class Config(ConfigSection):
     udev_rule = f'ACTION=="add", ENV{{DEVTYPE}}=="partition", RUN+="{sys.argv[0]} at"'
     udev_rule_path = pathlib.Path("/etc/udev/rules.d/udevbackup.rules")
 
-    section_name = "main"
+    ini_section_name = "main"
     text_options = {
         "smtp_auth_user": 'SMTP user. Default to "".',
         "smtp_auth_password": 'SMTP password. Default to "".',
@@ -297,9 +297,7 @@ class Config(ConfigSection):
         self.use_log_file: bool = use_log_file
         self.log_file: str | None = log_file
 
-        self.lock_file: fasteners.InterProcessLock | None = None
-        if lock_file:
-            self.lock_file = fasteners.InterProcessLock(lock_file)
+        self.lock_file: str | None = lock_file
 
         self.rules: dict[str, Rule] = {}  # rules[fs_uuid] = Rule()
 
@@ -376,26 +374,21 @@ class Config(ConfigSection):
                         synonyms[f"{method}={dev_part.name}"] = uuid
         return synonyms
 
-    def run(self, fs_uuid: str):
+    def run(self, fs_uuid: str) -> bool:
         if fs_uuid not in self.rules:
             # no message: we don't want a message everytime a device is connected
-            return
+            return False
+        os.chdir(self.temp_directory)
         rule: Rule = self.rules[fs_uuid]
 
         self.log_text(f"Device {fs_uuid} is connected.", level=INFO)
         try:
             if self.lock_file:
-                self.log_text(
-                    f"Waiting for {self.lock_file.path.decode()}.", level=INFO
-                )
-                with self.lock_file:
-                    self.log_text(
-                        f"{self.lock_file.path.decode()} acquired.", level=INFO
-                    )
+                self.log_text(f"Waiting for {self.lock_file}.", level=INFO)
+                with fasteners.InterProcessLock(self.lock_file):
+                    self.log_text(f"{self.lock_file} acquired.", level=INFO)
                     rule.execute()
-                    self.log_text(
-                        f"{self.lock_file.path.decode()} release.", level=INFO
-                    )
+                    self.log_text(f"{self.lock_file} release.", level=INFO)
             else:
                 rule.execute()
         except Exception as e:
@@ -418,6 +411,7 @@ class Config(ConfigSection):
                 attachments=[rule.stdout_path, rule.stderr_path],
             )
         self.log_text(f"Device {fs_uuid} can be disconnected.", level=INFO)
+        return len(rule.errors) == 0
 
     def log_text(self, text, level=INFO):
         if self.use_log_file:
