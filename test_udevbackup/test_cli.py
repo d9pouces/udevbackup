@@ -1,7 +1,5 @@
-import subprocess
 import tempfile
 from importlib.resources import as_file, files
-from logging import Logger
 
 import pytest
 
@@ -13,11 +11,9 @@ from test_udevbackup.utils import (
     prepare_config,
 )
 from udevbackup.cli import load_config, main
-from udevbackup.rule import Config
 
 
 def test_load_config(monkeypatch):
-    # monkeypatch.setenv("SMTP_SERVER", "smtp.server")
     with as_file(files("test_udevbackup") / "data/empty") as config_dir:
         config = load_config(config_dir)
     assert config.rules == {}
@@ -56,21 +52,23 @@ def test_load_config(monkeypatch):
     assert rule.post_script == 'echo "Post-backup script running"'
 
 
-def test_main(monkeypatch):
-    called_method = []
-    log = []
-    monkeypatch.setattr(Config, "show", lambda __: called_method.append("show"))
-    monkeypatch.setattr(
-        Logger, "log", lambda level, msg, *args, **kwargs: log.append((level, msg))
-    )
-    monkeypatch.setattr(
-        Config, "run", lambda __, fs_uuid: called_method.extend(["run", fs_uuid])
-    )
-    with as_file(files("test_udevbackup") / "data/complete") as config_dir:
+def test_main_show_complete(monkeypatch):
+    with as_file(
+        files("test_udevbackup") / "data/complete"
+    ) as config_dir, monkeypatch.context() as m, tempfile.TemporaryDirectory() as tmpdir:
+        prepare_config(tmpdir, m)
         assert main(["-C", str(config_dir), "show"]) == 0
-    with as_file(files("test_udevbackup") / "data/invalid") as config_dir:
+
+
+def test_main_show_invalid(monkeypatch):
+    with as_file(
+        files("test_udevbackup") / "data/invalid"
+    ) as config_dir, monkeypatch.context() as m, tempfile.TemporaryDirectory() as tmpdir:
+        prepare_config(tmpdir, m)
         assert main(["-C", str(config_dir), "show"]) == 1
 
+
+def test_main_at_complete_env(monkeypatch):
     with as_file(
         files("test_udevbackup") / "data/complete"
     ) as config_dir, monkeypatch.context() as m, tempfile.TemporaryDirectory() as tmpdir:
@@ -84,6 +82,8 @@ def test_main(monkeypatch):
             in config.popen_inputs[0]
         )
 
+
+def test_main_at_complete(monkeypatch):
     with as_file(
         files("test_udevbackup") / "data/complete"
     ) as config_dir, monkeypatch.context() as m, tempfile.TemporaryDirectory() as tmpdir:
@@ -91,6 +91,8 @@ def test_main(monkeypatch):
         assert main(["-C", str(config_dir), "at"]) == 1
         assert config.popen_commands_full == []
 
+
+def test_main_at_no_at(monkeypatch):
     with as_file(
         files("test_udevbackup") / "data/complete"
     ) as config_dir, monkeypatch.context() as m, tempfile.TemporaryDirectory() as tmpdir:
@@ -105,6 +107,8 @@ def test_main(monkeypatch):
             in config.popen_inputs[0]
         )
 
+
+def test_main_at_invalid_at(monkeypatch):
     with as_file(
         files("test_udevbackup") / "data/complete"
     ) as config_dir, monkeypatch.context() as m, tempfile.TemporaryDirectory() as tmpdir:
@@ -119,6 +123,8 @@ def test_main(monkeypatch):
             in config.popen_inputs[0]
         )
 
+
+def test_main_run_complete_fs_uuid(monkeypatch):
     with as_file(
         files("test_udevbackup") / "data/complete"
     ) as config_dir, monkeypatch.context() as m, tempfile.TemporaryDirectory() as tmpdir:
@@ -129,6 +135,8 @@ def test_main(monkeypatch):
         )
         assert config.popen_commands_full == []
 
+
+def test_main_run_complete(monkeypatch):
     with as_file(
         files("test_udevbackup") / "data/complete"
     ) as config_dir, monkeypatch.context() as m, tempfile.TemporaryDirectory() as tmpdir:
@@ -136,6 +144,8 @@ def test_main(monkeypatch):
         assert main(["-C", str(config_dir), "run"]) == 1
         assert config.popen_commands_full == []
 
+
+def test_main_run_example(monkeypatch):
     with as_file(
         files("test_udevbackup") / "data/complete"
     ) as config_dir, monkeypatch.context() as m, tempfile.TemporaryDirectory() as tmpdir:

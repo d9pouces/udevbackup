@@ -10,7 +10,7 @@ from logging import ERROR, INFO
 from systemlogger import getLogger
 from termcolor import cprint
 
-from udevbackup.rule import Config, Rule
+from udevbackup.rule import Config, Rule, get_command
 
 logger = getLogger(name="udevbackup", extra_tags={"application_fqdn": "system"})
 
@@ -40,12 +40,13 @@ def main(args: list[str] | None = None):
     )
     parser.add_argument(
         "command",
-        choices=("show", "run", "example", "at"),
+        choices=("show", "run", "example", "at", "install"),
         help="""command to run.
                         show: show the loaded configuration.
                         run: run the script for the given filesystem uuid (/dev/disk/by-uuid/XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX).
                         example: show a example of config file.
                         at: launch this script through `at` and immediately exits.
+                        install: install the udev rule.
                         """,
     )
     parser.add_argument(
@@ -76,13 +77,25 @@ def main(args: list[str] | None = None):
         config.show()
     elif args.command == "at":
         if not args.fs_uuid:
+            cprint(
+                "No filesystem uuid provided: use --fs-uuid or set the ID_FS_UUID environment variable",
+                "red",
+                file=sys.stderr,
+            )
+
             logger.log(
                 ERROR,
                 "No filesystem uuid provided: use --fs-uuid or set the ID_FS_UUID environment variable",
             )
             return_code = 1
         else:
-            cmd = [sys.argv[0], "run", "--fs-uuid", args.fs_uuid, "-C", args.config_dir]
+            cmd = get_command() + [
+                "run",
+                "--fs-uuid",
+                args.fs_uuid,
+                "-C",
+                args.config_dir,
+            ]
             at_cmd = shlex.join(cmd)
             logger.log(INFO, at_cmd)
             cmd = ["at", "now"]
@@ -97,6 +110,11 @@ def main(args: list[str] | None = None):
                 return_code = 3
     elif args.command == "run":
         if not args.fs_uuid:
+            cprint(
+                "No filesystem uuid provided: use --fs-uuid or set the ID_FS_UUID environment variable",
+                "red",
+                file=sys.stderr,
+            )
             logger.log(
                 ERROR,
                 "No filesystem uuid provided: use --fs-uuid or set ID_FS_UUID environment variable",
@@ -105,11 +123,29 @@ def main(args: list[str] | None = None):
         else:
             logger.log(INFO, f"{args.fs_uuid} detected")
             return_code = 0 if config.run(args.fs_uuid) else 4
+    elif args.command == "install":
+        try:
+            with open(Config.udev_rule_path, "w", encoding="utf-8") as f:
+                f.write(Config.udev_rule() + "\n")
+            p = subprocess.Popen(["udevadm", "control", "--reload-rules"])
+            p.communicate()
+            cprint(
+                f"udev rule installed at {Config.udev_rule_path}.",
+                "green",
+                file=sys.stdout,
+            )
+        except Exception as e:
+            cprint(f"Unable to install udev rule: {e}.", "red", file=sys.stderr)
+            return_code = 5
     elif args.command == "example":
-        Config.show_rule_file()
-        cprint(f"Create one or more .ini files in {args.config_dir}.")
-        cprint("Yellow lines are mandatory.")
+        Config.show_rule_file(stdout=sys.stdout, stderr=sys.stderr)
+        cprint(
+            f"Create one or more .ini files in {args.config_dir}.",
+            force_color=True,
+            file=sys.stdout,
+        )
+        cprint("Yellow lines are mandatory.", force_color=True, file=sys.stdout)
         Config.print_help(Config.ini_section_name)
-        cprint("")
+        cprint("", force_color=True, file=sys.stdout)
         Rule.print_help("example")
     return return_code

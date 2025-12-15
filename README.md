@@ -1,16 +1,21 @@
 UdevBackup
 ==========
 
-On Linux, detects when specified storage devices are connected, then mounts them,
-executes a script, unmounts them and tells when it is done with an email.
+Launch a backup script when an external storage device is connected.
 
-A config file defines storage devices and the scripts to run.
+Create a configuration file to define which devices to monitor and which scripts to run.
+When this device is connected, the volume is mounted, the script is launched automatically and then the volume is
+unmounted.
+An email can be sent with the output of the script at the end.
+
+If the device is LUKS encrypted, it can be automatically unlocked if its UUID is defined in the config file and if a key
+is provided in the /etc/crypttab file.
 
 I wrote this script for a simple offline backup of my server: I just have to turn
-the external USB drive on and wait for the email before
-turning it off again.
+the external USB drive on and wait for the email before turning it off again.
 
-Require the "at" utility for running long jobs (more than 30 seconds).
+Only works on Linux, detecting the connection with udev rules and with the "at" utility to run long jobs (more than 30
+seconds).
 
 installation
 ------------
@@ -19,19 +24,10 @@ installation
 sudo pipx install udevbackup
 ```
 
-you need to create a udev rule to launch udevbackup when a new device (with a file system) is connected:
+you need to install an udev rule to launch udevbackup when a new device (with a file system) is connected:
 
 ```bash
-    UDEVBACKUP=$(which udevbackup)
-    echo "ACTION==\"add\", ENV{DEVTYPE}==\"partition\", RUN+=\"${UDEVBACKUP} at\"" | sudo tee /etc/udev/rules.d/udevbackup.rules
-    udevadm control --reload-rules
-```
-
-If you only have short jobs (less than 30s), you can use:
-
-```bash
-    echo "ACTION==\"add\", ENV{DEVTYPE}==\"partition\", RUN+=\"${UDEVBACKUP} run\"" | sudo tee /etc/udev/rules.d/udevbackup.rules
-    udevadm control --reload-rules
+    sudo udevbackup install
 ```
 
 configuration
@@ -65,7 +61,7 @@ use_stdout = Display messages on stdout. Default to 0.
 
 [example]
 command = Command running the script (whose name is passed as first argument). Default to "bash".
-fs_uuid = UUID of the used file system.
+fs_uuid = UUID of the target partition.
 luks_uuid = UUID of the LUKS partition (a key must be provided in the /etc/crypttab file).
 mount_options = Extra mount options. Default to "".
 post_script = Script to run after the disk umount. Only run if the disk was mounted. Default to "".

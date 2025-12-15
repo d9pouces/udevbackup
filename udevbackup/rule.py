@@ -22,6 +22,13 @@ from termcolor import cprint
 logger = getLogger(name="udevbackup", extra_tags={"application_fqdn": "system"})
 
 
+def get_command() -> list[str] | None:
+    """Return the current method used to invoke udevbackup."""
+    if sys.orig_argv[1] == "-m" and sys.orig_argv[2] == "udevbackup":
+        return [sys.executable, "-m", "udevbackup"]
+    return [sys.executable, sys.orig_argv[1]]
+
+
 class ConfigSection:
     text_options = {}
     bool_options = {}
@@ -69,7 +76,7 @@ class ConfigSection:
 
 class Rule(ConfigSection):
     text_options = {
-        "fs_uuid": "UUID of the used file system.",
+        "fs_uuid": "UUID of the target partition.",
         "luks_uuid": "UUID of the LUKS partition (a key must be provided in the /etc/crypttab file).",
         "command": 'Command running the script (whose name is passed as first argument). Default to "bash".',
         "script": "Content of the script to execute when the disk is mounted. "
@@ -242,8 +249,7 @@ class Rule(ConfigSection):
 
 
 class Config(ConfigSection):
-    udev_rule = f'ACTION=="add", ENV{{DEVTYPE}}=="partition", RUN+="{sys.argv[0]} at"'
-    udev_rule_path = pathlib.Path("/etc/udev/rules.d/udevbackup.rules")
+    udev_rule_path = pathlib.Path("/etc/udev/rules.d/99-udevbackup.rules")
 
     ini_section_name = "main"
     text_options = {
@@ -498,7 +504,7 @@ class Config(ConfigSection):
                 "A udev rule must be added first.", "red", file=stderr, force_color=True
             )
             cprint(
-                f"echo '{cls.udev_rule}' | sudo tee {cls.udev_rule_path}",
+                f"echo '{cls.udev_rule()}' | sudo tee {cls.udev_rule_path}",
                 "green",
                 file=stdout,
                 force_color=True,
@@ -506,6 +512,12 @@ class Config(ConfigSection):
             cprint(
                 "udevadm control --reload-rules", "green", file=stdout, force_color=True
             )
+
+    @classmethod
+    def udev_rule(cls) -> str:
+        cmd = get_command() + ["at"]
+        at_cmd = shlex.join(cmd)
+        return f'ACTION=="add", ENV{{DEVTYPE}}=="partition", RUN+="{at_cmd}"'
 
     def send_email(self, content, subject=None, attachments=None):
         try:
@@ -515,10 +527,15 @@ class Config(ConfigSection):
             else:
                 smtp = smtplib.SMTP(self.smtp_server, self.smtp_smtp_port)
                 smtp.set_debuglevel(0)
-                smtp.starttls()
+                if self.smtp_use_starttls:
+                    smtp.starttls()
             if self.smtp_auth_user and self.smtp_auth_password:
                 smtp.login(self.smtp_auth_user, self.smtp_auth_password)
             if not self.smtp_from_email or not self.smtp_to_email:
+                self.log_text(
+                    "Unable to send e-mail: SMTP from/to e-mail address is not configured.",
+                    level=ERROR,
+                )
                 return
             msg = MIMEMultipart()
             msg["From"] = self.smtp_from_email
@@ -528,21 +545,19 @@ class Config(ConfigSection):
             msg.attach(MIMEText(content, "plain"))
             if attachments:
                 for attachment in attachments:
-                    if not os.path.isfile(attachment):
-                        continue
-                    part = MIMEBase("application", "octet-stream")
-                    with open(attachment, "rb") as fd:
-                        attachment_content = fd.read()
-                    part.set_payload(attachment_content)
-                    encoders.encode_base64(part)
-                    part.add_header(
-                        "Content-Disposition",
-                        f"attachment; filename= {os.path.basename(attachment)}",
-                    )
-                    msg.attach(part)
-
+                    if os.path.isfile(attachment):
+                        part = MIMEBase("application", "octet-stream")
+                        with open(attachment, "rb") as fd:
+                            attachment_content = fd.read()
+                        part.set_payload(attachment_content)
+                        encoders.encode_base64(part)
+                        part.add_header(
+                            "Content-Disposition",
+                            f"attachment; filename= {os.path.basename(attachment)}",
+                        )
+                        msg.attach(part)
             smtp.sendmail(self.smtp_from_email, [self.smtp_to_email], msg.as_string())
         except Exception as e:
             self.log_text(
-                f"Unable to send mail to {self.smtp_to_email}: {e}.", level=INFO
+                f"Unable to send mail to {self.smtp_to_email}: {e}.", level=ERROR
             )
