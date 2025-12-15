@@ -1,5 +1,6 @@
 import logging
 import pathlib
+import smtplib
 import tempfile
 
 from test_udevbackup.utils import (
@@ -10,6 +11,7 @@ from test_udevbackup.utils import (
     UUID_LUKS_3_PARTITION,
     UUID_LUKSED_PARTITION,
     UUID_RAW_PARTITION,
+    FakeSMTP,
     prepare_config,
 )
 from udevbackup.rule import Config
@@ -89,7 +91,7 @@ def test_show(monkeypatch):
         config.rules.clear()
         config.stderr.seek(0)
         config.stdout.seek(0)
-        Config.udev_rule_path.write_text(Config.udev_rule)
+        Config.udev_rule_path.write_text(Config.udev_rule())
         config.show()
         assert "A udev rule must be added first." not in config.stderr.getvalue()
         assert (
@@ -98,7 +100,7 @@ def test_show(monkeypatch):
         )
 
 
-def test_run(monkeypatch):
+def test_run_raw(monkeypatch):
     with tempfile.TemporaryDirectory() as tmpdir:
         config = prepare_config(tmpdir, monkeypatch)
         config.identify_cryptodevices()
@@ -115,6 +117,8 @@ def test_run(monkeypatch):
         assert "Successful." in config._log_content
         assert config.popen_commands_short == ["mount", "bash", "umount"]
 
+
+def test_run_luks(monkeypatch):
     with tempfile.TemporaryDirectory() as tmpdir:
         config = prepare_config(tmpdir, monkeypatch)
         config.identify_cryptodevices()
@@ -132,3 +136,60 @@ def test_run(monkeypatch):
             "umount",
             "cryptsetup",
         ]
+
+
+def test_send_email_no_email(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = prepare_config(tmpdir, monkeypatch)
+        config.identify_cryptodevices()
+        config.use_smtp = True
+        config.smtp_use_starttls = True
+        config.smtp_use_tls = False
+        config.run(UUID_RAW_PARTITION)
+        assert config.popen_commands_short == ["mount", "bash", "umount"]
+        assert (
+            40,
+            "Unable to send e-mail: SMTP from/to e-mail address is not configured.",
+        ) in config.logger_content
+
+
+def test_send_email(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = prepare_config(tmpdir, monkeypatch)
+        config.identify_cryptodevices()
+        config.use_smtp = True
+        config.smtp_use_starttls = True
+        config.smtp_use_tls = False
+
+        config.smtp_from_email = "from@example.com"
+        config.smtp_to_email = "to@example.com"
+        config.smtp_auth_password = "password123"
+        config.smtp_auth_user = "user"
+        config.smtp_use_tls = True
+
+        config.run(UUID_RAW_PARTITION)
+        assert (
+            40,
+            f"Unable to send mail to {config.smtp_to_email}: Authentication failed.",
+        ) in config.logger_content
+        assert config.popen_commands_short == ["mount", "bash", "umount"]
+
+
+def test_send_email_valid(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = prepare_config(tmpdir, monkeypatch)
+        config.identify_cryptodevices()
+        config.use_smtp = True
+        config.smtp_use_starttls = True
+        config.smtp_use_tls = False
+        config.smtp_from_email = "from@example.com"
+        config.smtp_to_email = "to@example.com"
+        config.smtp_auth_password = "pass"
+        config.smtp_auth_user = "user"
+        config.popen_commands_short.clear()
+        config.run(UUID_RAW_PARTITION)
+        assert config.popen_commands_short == ["mount", "bash", "umount"]
+        assert (
+            40,
+            f"Unable to send mail to {config.smtp_to_email}: Authentication failed.",
+        ) not in config.logger_content

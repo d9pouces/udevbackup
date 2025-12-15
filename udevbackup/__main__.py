@@ -1,9 +1,9 @@
-from udevbackup.cli import main
+from udevbackup import cli
 
 
 def execute(name):
     if name == "__main__":
-        main()
+        cli.main()
 
 
 execute(__name__)

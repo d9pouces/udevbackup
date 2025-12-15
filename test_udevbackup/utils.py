@@ -2,7 +2,9 @@ import io
 import os
 import pathlib
 import pwd
+import smtplib
 import subprocess
+import sys
 from logging import Logger
 
 from udevbackup.rule import Config, Rule
@@ -63,6 +65,8 @@ class TestConfig(Config):
         self.logger_content: list[tuple[int, str]] = []
         self.popen_commands_full: list[list[str]] = []
         self.popen_commands_short: list[str] = []
+        self.popen_result: dict[str, int | Exception] = {}
+        self.popen_inputs: list[bytes | None] = []
         self.stdout = io.StringIO()
         self.stderr = io.StringIO()
         self.luks_open_timeout = 0.2
@@ -103,13 +107,19 @@ def prepare_config(tmpdir: str, monkeypatch) -> TestConfig:
     monkeypatch.setattr(
         Logger,
         "log",
-        lambda level, msg, *args, **kwargs: config.logger_content.append((level, msg)),
+        lambda logger, level, msg, *args, **kwargs: config.logger_content.append(
+            (level, msg)
+        ),
     )
     monkeypatch.setattr(
         subprocess,
         "Popen",
         lambda *args, **kwargs: FakePopen(config, *args, **kwargs),
     )
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+    monkeypatch.setattr(smtplib, "SMTP_SSL", FakeSMTP)
+    monkeypatch.setattr(sys, "stdout", config.stdout)
+    monkeypatch.setattr(sys, "stderr", config.stderr)
     monkeypatch.setattr(pwd, "getpwnam", getpwnam)
     monkeypatch.setattr(os, "chown", chown)
     config.temp_directory = dev_root / "tmp"
@@ -153,9 +163,45 @@ class FakePopen:
         self.stdin = stdin
         self.returncode = 0
 
-    def communicate(self, data: bytes = None):
+    def communicate(self, data: bytes | None = None):
         self.config.popen_commands_full.append(self.command)
         self.config.popen_commands_short.append(self.command[0])
+        self.config.popen_inputs.append(data)
+        if self.command[0] in self.config.popen_result:
+            result = self.config.popen_result[self.command[0]]
+            if isinstance(result, Exception):
+                raise result
+            self.returncode = result
         if self.command[0] == "cryptdisks_start":
             self.config.prepare_device("luksed")
         return None, None
+
+
+class FakeSMTP:
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = port
+        self.started_tls = False
+        self.logged_in = False
+        self.sent_messages: list[str] = []
+        self.log_level = 0
+
+    def set_debuglevel(self, level: int):
+        self.log_level = level
+
+    def starttls(self):
+        self.started_tls = True
+
+    def login(self, username: str, password: str):
+        if username == "user" and password == "pass":
+            self.logged_in = True
+        else:
+            raise Exception("Authentication failed")
+
+    def sendmail(self, from_addr: str, to_addrs: list[str], msg: str):
+        if not self.logged_in:
+            raise Exception("Not logged in")
+        self.sent_messages.append(msg)
+
+    def quit(self):
+        pass
